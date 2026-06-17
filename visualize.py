@@ -17,6 +17,10 @@ FIG_DIR = ROOT / "figures"
 TABLE_DIR = FIG_DIR / "summary_tables"
 DEEPSET_DATA_DIR = ROOT / "DeepSetProblem" / "data" / "final"
 DEEPSET_MODEL_DIR = ROOT / "DeepSetProblem" / "models" / "final"
+THREE_BODY_DIR = ROOT / "3BodyProblem"
+THREE_BODY_DATA_DIR = THREE_BODY_DIR / "data"
+THREE_BODY_MODEL_DIR = THREE_BODY_DIR / "models" / "sweep"
+THREE_BODY_RESULT_PATH = THREE_BODY_DIR / "total_result.csv"
 
 FIG_DIR.mkdir(exist_ok=True)
 TABLE_DIR.mkdir(exist_ok=True)
@@ -99,6 +103,27 @@ class SharedMLP(nn.Module):
         return x
 
 
+class EquivariantLinear2D(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        scale = 1.0 / np.sqrt(in_channels * 3)
+        self.A = nn.Parameter(torch.randn(out_channels, in_channels) * scale)
+        self.B = nn.Parameter(torch.randn(out_channels, in_channels) * scale)
+        self.C = nn.Parameter(torch.randn(out_channels, in_channels) * scale)
+        self.D = nn.Parameter(torch.randn(out_channels, in_channels) * scale)
+        self.E = nn.Parameter(torch.randn(out_channels, in_channels) * scale)
+        self.bias_sym = nn.Parameter(torch.zeros(out_channels))
+        self.bias_third = nn.Parameter(torch.zeros(out_channels))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        row1 = torch.cat([self.A, self.B, self.C], dim=1)
+        row2 = torch.cat([self.B, self.A, self.C], dim=1)
+        row3 = torch.cat([self.D, self.D, self.E], dim=1)
+        weight = torch.cat([row1, row2, row3], dim=0)
+        bias = torch.cat([self.bias_sym, self.bias_sym, self.bias_third], dim=0)
+        return x @ weight.t() + bias
+
+
 def symmetry_error(model: nn.Module, x: torch.Tensor, n_blocks: int, repeat: int = 5) -> float:
     model.eval()
     batch_size = x.shape[0]
@@ -119,6 +144,54 @@ def count_parameters(model: nn.Module) -> int:
 
 def load_tensor(name: str) -> torch.Tensor:
     return torch.load(DEEPSET_DATA_DIR / name, map_location="cpu")
+
+
+def swap_first_two_particles(x: torch.Tensor) -> torch.Tensor:
+    swapped = x.clone()
+    swapped[..., 0:4] = x[..., 4:8]
+    swapped[..., 4:8] = x[..., 0:4]
+    return swapped
+
+
+def build_vanilla_3body(layer_dims: list[int]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for idx in range(len(layer_dims) - 1):
+        layers.append(nn.Linear(layer_dims[idx], layer_dims[idx + 1]))
+        if idx < len(layer_dims) - 2:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+
+def build_shared_3body(channel_dims: list[int]) -> nn.Sequential:
+    layers: list[nn.Module] = []
+    for idx in range(len(channel_dims) - 1):
+        layers.append(EquivariantLinear2D(channel_dims[idx], channel_dims[idx + 1]))
+        if idx < len(channel_dims) - 2:
+            layers.append(nn.ReLU())
+    return nn.Sequential(*layers)
+
+
+THREE_BODY_MODEL_CONFIGS = {
+    "small": {
+        "vanilla_dims": [12, 48, 48, 12],
+        "shared_dims": [4, 16, 16, 4],
+    },
+    "medium": {
+        "vanilla_dims": [12, 48, 96, 96, 48, 12],
+        "shared_dims": [4, 16, 24, 24, 16, 4],
+    },
+    "large": {
+        "vanilla_dims": [12, 96, 192, 48, 12],
+        "shared_dims": [4, 32, 64, 16, 4],
+    },
+}
+
+THREE_BODY_MODEL_LABELS = {
+    "vanilla": "Vanilla",
+    "vanilla_aug": "Vanilla + Aug",
+    "shared": "Share",
+    "shared_aug": "Share + Aug",
+}
 
 
 def build_deepset_summary() -> pd.DataFrame:
@@ -293,10 +366,186 @@ def plot_deepset(df: pd.DataFrame) -> None:
     plt.close()
 
 
+def build_three_body_summary() -> pd.DataFrame:
+    df = pd.read_csv(THREE_BODY_RESULT_PATH).copy()
+    df["task"] = "3Body"
+    df["model_label"] = df["model"].map(THREE_BODY_MODEL_LABELS)
+    df["model_family"] = np.where(df["model"].str.contains("shared"), "shared", "vanilla")
+    df["augment_label"] = np.where(df["augment"], "Aug", "No Aug")
+    df["size_tag"] = pd.Categorical(df["size_tag"], ["small", "medium", "large"], ordered=True)
+    df = df.sort_values(["size_tag", "data_size", "model"]).reset_index(drop=True)
+    return df
+
+
+def plot_three_body_summary(df: pd.DataFrame) -> None:
+    palette = {
+        "Vanilla": "#d62728",
+        "Vanilla + Aug": "#ff9896",
+        "Share": "#1f77b4",
+        "Share + Aug": "#17becf",
+    }
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
+    size_tags = ["small", "medium", "large"]
+    model_order = ["Vanilla", "Vanilla + Aug", "Share", "Share + Aug"]
+
+    for col, size_tag in enumerate(size_tags):
+        sub = df[df["size_tag"] == size_tag]
+        ax_loss = axes[0, col]
+        ax_sym = axes[1, col]
+
+        for model_label in model_order:
+            model_sub = sub[sub["model_label"] == model_label].sort_values("data_size")
+            ax_loss.plot(
+                model_sub["data_size"],
+                model_sub["loss"],
+                marker="o",
+                linewidth=2.2,
+                color=palette[model_label],
+                label=model_label,
+            )
+            ax_sym.plot(
+                model_sub["data_size"],
+                model_sub["sym_error"],
+                marker="o",
+                linewidth=2.2,
+                color=palette[model_label],
+                label=model_label,
+            )
+
+        ax_loss.set_xscale("log")
+        ax_loss.set_yscale("log")
+        ax_loss.set_title(f"{size_tag.capitalize()} model")
+        ax_loss.set_ylabel("Test loss")
+
+        ax_sym.set_xscale("log")
+        ax_sym.set_yscale("log")
+        ax_sym.set_xlabel("Data size")
+        ax_sym.set_ylabel("Symmetry error")
+
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+    fig.suptitle("Task 3: Test Loss and Symmetry Error by Data Size", y=1.02)
+    plt.tight_layout()
+    save_figure("3body_summary.png")
+    plt.close(fig)
+
+
+def load_three_body_model(model_name: str, size_tag: str, data_size: int) -> nn.Module:
+    config = THREE_BODY_MODEL_CONFIGS[size_tag]
+    if "shared" in model_name:
+        model = build_shared_3body(config["shared_dims"])
+    else:
+        model = build_vanilla_3body(config["vanilla_dims"])
+    state_dict = torch.load(
+        THREE_BODY_MODEL_DIR / f"{model_name}_{size_tag}_{data_size}.pt",
+        map_location="cpu",
+    )
+    model.load_state_dict(state_dict)
+    model.eval()
+    return model
+
+
+def find_rollout_start(x_test: torch.Tensor, y_test: torch.Tensor, segment_length: int = 15) -> int:
+    max_start = max(0, len(x_test) - segment_length)
+    for start in range(max_start):
+        contiguous = True
+        for offset in range(segment_length - 1):
+            if not torch.allclose(y_test[start + offset], x_test[start + offset + 1], atol=1e-5):
+                contiguous = False
+                break
+        if contiguous:
+            return start
+    return 0
+
+
+def rollout_model(model: nn.Module, init_state: torch.Tensor, steps: int) -> list[np.ndarray]:
+    states = [init_state.squeeze(0).detach().cpu().numpy()]
+    current = init_state.clone()
+    with torch.no_grad():
+        for _ in range(steps):
+            current = model(current)
+            states.append(current.squeeze(0).detach().cpu().numpy())
+    return states
+
+
+def plot_three_body_rollout(df: pd.DataFrame) -> None:
+    x_test = torch.load(THREE_BODY_DATA_DIR / "X_test.pt", map_location="cpu")
+    y_test = torch.load(THREE_BODY_DATA_DIR / "Y_test.pt", map_location="cpu")
+
+    best_shared = (
+        df[df["model_family"] == "shared"]
+        .sort_values(["loss", "sym_error", "params"], ascending=[True, True, True])
+        .iloc[0]
+    )
+    best_vanilla = (
+        df[df["model_family"] == "vanilla"]
+        .sort_values(["loss", "sym_error", "params"], ascending=[True, True, True])
+        .iloc[0]
+    )
+
+    shared_model = load_three_body_model(
+        model_name=best_shared["model"],
+        size_tag=str(best_shared["size_tag"]),
+        data_size=int(best_shared["data_size"]),
+    )
+    vanilla_model = load_three_body_model(
+        model_name=best_vanilla["model"],
+        size_tag=str(best_vanilla["size_tag"]),
+        data_size=int(best_vanilla["data_size"]),
+    )
+
+    start = find_rollout_start(x_test, y_test, segment_length=15)
+    gt_states = [x_test[start].detach().cpu().numpy()]
+    for idx in range(start, start + 15):
+        gt_states.append(y_test[idx].detach().cpu().numpy())
+
+    init_state = x_test[start : start + 1]
+    shared_states = rollout_model(shared_model, init_state, steps=15)
+    vanilla_states = rollout_model(vanilla_model, init_state, steps=15)
+
+    state_sets = [
+        ("Ground truth", gt_states),
+        ("Best Vanilla", vanilla_states),
+        ("Best Share", shared_states),
+    ]
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+    markers = ["o", "s", "^"]
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), sharex=True, sharey=True)
+    for ax, (title, states) in zip(axes, state_sets):
+        arr = np.asarray(states)
+        positions = arr[:, :6].reshape(len(states), 3, 2)
+        for particle_idx in range(3):
+            ax.plot(
+                positions[:, particle_idx, 0],
+                positions[:, particle_idx, 1],
+                marker=markers[particle_idx],
+                markersize=4,
+                linewidth=1.8,
+                color=colors[particle_idx],
+                label=f"Particle {particle_idx + 1}",
+            )
+        ax.set_title(title)
+        ax.set_xlabel("x")
+    axes[0].set_ylabel("y")
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+    fig.suptitle("Task 3: Representative Rollout Comparison", y=1.03)
+    plt.tight_layout()
+    save_figure("3body_rollout.png")
+    plt.close(fig)
+
+
 def main() -> None:
-    df = build_deepset_summary()
-    save_table(df, "deepset_summary")
-    plot_deepset(df)
+    deepset_df = build_deepset_summary()
+    save_table(deepset_df, "deepset_summary")
+    plot_deepset(deepset_df)
+
+    three_body_df = build_three_body_summary()
+    save_table(three_body_df, "three_body_summary")
+    plot_three_body_summary(three_body_df)
+    plot_three_body_rollout(three_body_df)
 
 
 if __name__ == "__main__":
