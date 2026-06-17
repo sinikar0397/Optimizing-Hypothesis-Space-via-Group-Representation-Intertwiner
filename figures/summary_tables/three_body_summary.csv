@@ -1,0 +1,5 @@
+task,name,model_family,variant,test_loss,symmetry_error,params,architecture
+3Body,equiv_model1_0408,shared,checkpoint_1,1.9846760034561157,2.843416040815283e-12,1992,E(4->16) - E(16->16) - E(16->4)
+3Body,vanilla_model1_0408,vanilla,checkpoint_1,0.7257034778594971,2.4617154598236084,3564,L(12->48) - L(48->48) - L(48->12)
+3Body,equiv_model2_0408,shared,checkpoint_2,1.9846760034561157,2.843416040815283e-12,1992,E(4->16) - E(16->16) - E(16->4)
+3Body,vanilla_model2_0408,vanilla,checkpoint_2,0.7257034778594971,2.4617154598236084,3564,L(12->48) - L(48->48) - L(48->12)
