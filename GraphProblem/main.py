@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from sklearn.model_selection import train_test_split
 import torch.optim as optim
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader as PyTorchDataLoader
 from torch.utils.data import TensorDataset
@@ -39,23 +39,32 @@ class PermutedDataset(Dataset):
     permutation이 매번 바뀌는 것이 아니기에, augment와 같은 효과를 내지 못함
     기타 전처리 (노드 최대 50개로 조절)도 함께 시행
 
+    [multi-seed 수정] seed 인자를 받아 permutation 생성을 해당 seed에 종속시킴.
+    -> seed별로 독립된 "고정 permutation"을 갖게 되어, 진짜 독립 반복(replicate)이 됨.
+
     Args:
         base_datset (Dataset) : 기존 Datset (probably NCI1 Dataset)
         max_nodes (int) : NCI1 dataset에서 저장할 최대 노드 개수
+        seed (int) : permutation 생성에 사용할 seed
         permutations (array of tensor) :  사전 저장한 각 데이터별 permutation
     '''
 
-    def __init__(self, base_dataset, max_nodes):
+    def __init__(self, base_dataset, max_nodes, seed=0):
 
         self.base_dataset = base_dataset
         self.max_nodes = max_nodes
+
+        # permutation 생성을 이 함수 안에서만 seed에 종속되도록 격리
+        # (torch 전역 random state 오염 방지)
+        g = torch.Generator()
+        g.manual_seed(seed)
 
         self.permutations = []
 
         for data in base_dataset:
 
             num_nodes = min(data.x.size(0), max_nodes)
-            perm_real = torch.randperm(num_nodes)
+            perm_real = torch.randperm(num_nodes, generator=g)
             perm_full = torch.cat([
                 perm_real,
                 torch.arange(num_nodes, max_nodes)
@@ -118,21 +127,9 @@ max_nodes = 50
 node_features = dataset.num_node_features
 num_classes = dataset.num_classes
 
-permuted_dataset = PermutedDataset(dataset, max_nodes)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# [수정] permuted_dataset은 이제 seed별로 loop 안에서 생성 (아래 training iteration 참고)
+# 전역에서 한번만 만들면 모든 seed가 동일한 permutation을 공유하게 되어
+# "독립 반복"이라는 전제가 깨지기 때문.
 
 
 #
@@ -605,10 +602,11 @@ def evaluate_graph(name, model, loader):
     
     sym_err = symmetry_error_graph(model, loader, repeat=5)
     
-    print(f'[{name} Evaluation Result - Permuted Data]')
-    print(f'  Loss: {avg_loss:.6f}')
-    print(f'  Accuracy: {accuracy * 100:.2f}%')
-    print(f'  Symmetry Error: {sym_err:.6e}\n')
+    if name is not None:
+        print(f'[{name} Evaluation Result - Permuted Data]')
+        print(f'  Loss: {avg_loss:.6f}')
+        print(f'  Accuracy: {accuracy * 100:.2f}%')
+        print(f'  Symmetry Error: {sym_err:.6e}\n')
     
     return avg_loss, accuracy, sym_err
 
@@ -620,20 +618,11 @@ def evaluate_graph(name, model, loader):
 #
 
 
-# 1. 결과 및 체크포인트를 저장할 디렉토리 생성
+# 1. 결과 및 체크포인트를 저장할 디렉토리 생성 (multi-seed 버전은 별도 폴더에 저장)
 models_path = './models'
-logs_path = './logs'
+logs_path = './logs/'
 os.makedirs(models_path, exist_ok=True)
 os.makedirs(logs_path, exist_ok=True)
-
-# ====================================================================
-# [수정] 전체 데이터셋의 인덱스를 미리 무작위로 섞어둡니다.
-# 이렇게 해야 특정 data_size를 뽑았을 때 클래스가 한쪽으로 몰리지 않습니다.
-# ====================================================================
-all_indices = list(range(len(dataset)))
-random.seed(42)      # 실험의 재현성을 위해 파이썬 내장 random 시드 고정
-random.shuffle(all_indices)
-# ====================================================================
 
 # 2. Grid Search를 수행할 하이퍼파라미터 조건 정의
 n_blocks_list = [3, 5, 7]
@@ -644,141 +633,174 @@ hidden_dims_lst = [
     [256, 512, 256, 128, 128, 64, 16]
 ]
 
-
-
-
-
+# --- multi-seed 설정 ---
+# 최소 5개 권장. NCI1 학습이 DeepSet 예제보다 무거우니 먼저 seed 2개로 파일럿 실행 권장.
+seed_lst = [0, 1, 2, 3, 4]
 
 
 #
 # training iteration
 #
 
-result = {}
+# raw 결과를 long-format으로 보존 (mean/CI로 바로 뭉개지 않음)
+records = []
 
 for i in range(len(n_blocks_list)):
     n_block = n_blocks_list[i]
-    curr_result = {}
-    hidden_dims = hidden_dims_lst[i] 
-    
+    hidden_dims = hidden_dims_lst[i]
+
     for data_size in data_sizes_list:
-        print(f"\n" + "="*60)
-        print(f"▶ [실험 시작] Blocks(깊이): {n_block} | Dataset Size: {data_size}")
-        print("="*60)
-        
-        indices = all_indices[:data_size]
-        subset_dataset = Subset(permuted_dataset, indices)
-        
-        train_size = int(0.8 * data_size)
-        val_size = int(0.1 * data_size)
-        test_size = data_size - train_size - val_size
-        
-        if train_size == 0 or val_size == 0 or test_size == 0:
+
+        if data_size < 10:
             print(f"데이터 크기가 너무 작아 실험을 건너뜁니다. (Size: {data_size})")
             continue
-            
-        train_dataset, val_dataset, test_dataset = random_split(
-            subset_dataset, [train_size, val_size, test_size],
-            generator=torch.Generator().manual_seed(42)
-        )
-        
-        train_loader = PyTorchDataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=collate_fn)
-        val_loader = PyTorchDataLoader(val_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
-        test_loader = PyTorchDataLoader(test_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
 
+        for seed in seed_lst:
+            print(f"\n" + "="*60)
+            print(f"▶ [실험 시작] Blocks(깊이): {n_block} | Dataset Size: {data_size} | Seed: {seed}")
+            print("="*60)
 
-        symmetric_model = symmetricGraphMLP(
-            in_dim=node_features, 
-            hidden_size=hidden_dims, 
-            out_dim=num_classes
-        ).to(device)
-        
-        shared_log = train(
-            model=symmetric_model, 
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            epochs=100, # Grid Search 속도를 위해 에포크 조정 가능
-            lr=1e-3, 
-            early_stop=True, 
-            patience=5
-        )
+            # --- seed마다 전역 random state를 전부 고정 ---
+            random.seed(seed)
+            np.random.seed(seed)
+            torch.manual_seed(seed)
+            torch.cuda.manual_seed_all(seed)
 
-        
-        vanilla_model = vanillaGraphMLP(
-            max_nodes=max_nodes, 
-            in_dim=node_features, 
-            hidden_size=hidden_dims, 
-            out_dim=num_classes
-        ).to(device)
-        
-        vanilla_log = train(
-            model=vanilla_model, 
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            epochs=100, 
-            lr=1e-3, 
-            early_stop=True, 
-            patience=5
-        )
+            # --- 데이터 셔플/분할도 seed에 종속 ---
+            all_indices = list(range(len(dataset)))
+            random.shuffle(all_indices)  # 위에서 random.seed(seed)로 고정했으므로 seed별로 다른 셔플
 
-        symmetric_model_augmented = symmetricGraphMLP(
-            in_dim=node_features, 
-            hidden_size=hidden_dims, 
-            out_dim=num_classes
-        ).to(device)
-        
-        shared_log = train(
-            model=symmetric_model_augmented, 
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            epochs=100, # Grid Search 속도를 위해 에포크 조정 가능
-            lr=1e-3, 
-            early_stop=True, 
-            patience=5,
-            augment = True
-        )
-        
-        vanilla_model_augmented = vanillaGraphMLP(
-            max_nodes=max_nodes, 
-            in_dim=node_features, 
-            hidden_size=hidden_dims, 
-            out_dim=num_classes
-        ).to(device)
-        
-        vanilla_log = train(
-            model=vanilla_model_augmented, 
-            train_loader=train_loader, 
-            val_loader=val_loader, 
-            epochs=100, 
-            lr=1e-3, 
-            early_stop=True, 
-            patience=5,
-            augment = True
-        )
-        
-        sym_loss, sym_acc, sym_err = evaluate_graph("Symmetric Model", symmetric_model, test_loader)
-        van_loss, van_acc, van_err = evaluate_graph("Vanilla Model", vanilla_model, test_loader)
-        sym_aug_loss, sym_aug_acc, sym_aug_err = evaluate_graph("Symmetric Model(augmented)", symmetric_model_augmented, test_loader)
-        van_aug_loss, van_aug_acc, van_aug_err = evaluate_graph("Vanilla Model(augmented)", vanilla_model_augmented, test_loader)
-        
-        curr_result[data_size] = {
-            'symmetric': {'loss': sym_loss, 'acc': sym_acc, 'sym_error': sym_err},
-            'vanilla': {'loss': van_loss, 'acc': van_acc, 'sym_error': van_err},
-            'symmetric (data augmented)': {'loss': sym_aug_loss, 'acc': sym_aug_acc, 'sym_error': sym_aug_err},
-            'vanilla (data augmented)': {'loss': van_aug_loss, 'acc': van_aug_acc, 'sym_error': van_aug_err}
-        }
-        
-        torch.save(symmetric_model.state_dict(), os.path.join(models_path, f'shared_model_{n_block}_{data_size}.pt'))
-        torch.save(vanilla_model.state_dict(), os.path.join(models_path, f'vanilla_model_{n_block}_{data_size}.pt'))
-        
-        with open(os.path.join(logs_path, f'shared_log_{n_block}_{data_size}.pkl'), 'wb') as f:
-            pickle.dump(shared_log, f)
-        with open(os.path.join(logs_path, f'vanilla_log_{n_block}_{data_size}.pkl'), 'wb') as f:
-            pickle.dump(vanilla_log, f)
+            # --- permutation 자체도 seed별로 새로 생성 (독립 반복을 위해 재구성) ---
+            permuted_dataset = PermutedDataset(dataset, max_nodes, seed=seed)
 
-    result[n_block] = curr_result
+            indices = all_indices[:data_size]
+            subset_dataset = Subset(permuted_dataset, indices)
 
+            train_size = int(0.8 * data_size)
+            val_size = int(0.1 * data_size)
+            test_size = data_size - train_size - val_size
 
-with open('./total_result.pkl', 'wb') as f:
-    pickle.dump(result, f)
-print("\n모든 Grid Search 실험 조건 완수 및 파일 저장 완료")
+            if train_size == 0 or val_size == 0 or test_size == 0:
+                print(f"데이터 크기가 너무 작아 실험을 건너뜁니다. (Size: {data_size})")
+                continue
+
+            train_dataset, val_dataset, test_dataset = random_split(
+                subset_dataset, [train_size, val_size, test_size],
+                generator=torch.Generator().manual_seed(seed)
+            )
+
+            train_loader = PyTorchDataLoader(train_dataset, batch_size=64, shuffle=True, collate_fn=collate_fn)
+            val_loader = PyTorchDataLoader(val_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
+            test_loader = PyTorchDataLoader(test_dataset, batch_size=64, shuffle=False, collate_fn=collate_fn)
+
+            # ---- symmetric / vanilla (no augmentation) ----
+            symmetric_model = symmetricGraphMLP(
+                in_dim=node_features,
+                hidden_size=hidden_dims,
+                out_dim=num_classes
+            ).to(device)
+
+            train(
+                model=symmetric_model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=100,
+                lr=1e-3,
+                early_stop=True,
+                patience=5
+            )
+
+            vanilla_model = vanillaGraphMLP(
+                max_nodes=max_nodes,
+                in_dim=node_features,
+                hidden_size=hidden_dims,
+                out_dim=num_classes
+            ).to(device)
+
+            train(
+                model=vanilla_model,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=100,
+                lr=1e-3,
+                early_stop=True,
+                patience=5
+            )
+
+            # ---- symmetric / vanilla (augmentation) ----
+            symmetric_model_augmented = symmetricGraphMLP(
+                in_dim=node_features,
+                hidden_size=hidden_dims,
+                out_dim=num_classes
+            ).to(device)
+
+            train(
+                model=symmetric_model_augmented,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=100,
+                lr=1e-3,
+                early_stop=True,
+                patience=5,
+                augment=True
+            )
+
+            vanilla_model_augmented = vanillaGraphMLP(
+                max_nodes=max_nodes,
+                in_dim=node_features,
+                hidden_size=hidden_dims,
+                out_dim=num_classes
+            ).to(device)
+
+            train(
+                model=vanilla_model_augmented,
+                train_loader=train_loader,
+                val_loader=val_loader,
+                epochs=100,
+                lr=1e-3,
+                early_stop=True,
+                patience=5,
+                augment=True
+            )
+
+            sym_loss, sym_acc, sym_err = evaluate_graph(None, symmetric_model, test_loader)
+            van_loss, van_acc, van_err = evaluate_graph(None, vanilla_model, test_loader)
+            sym_aug_loss, sym_aug_acc, sym_aug_err = evaluate_graph(None, symmetric_model_augmented, test_loader)
+            van_aug_loss, van_aug_acc, van_aug_err = evaluate_graph(None, vanilla_model_augmented, test_loader)
+
+            # ---- long-format record 추가 ----
+            for model_name, loss_v, acc_v, err_v in [
+                ('symmetric', sym_loss, sym_acc, sym_err),
+                ('vanilla', van_loss, van_acc, van_err),
+                ('symmetric_aug', sym_aug_loss, sym_aug_acc, sym_aug_err),
+                ('vanilla_aug', van_aug_loss, van_aug_acc, van_aug_err),
+            ]:
+                records.append({
+                    'n_block': n_block,
+                    'data_size': data_size,
+                    'seed': seed,
+                    'model': model_name,
+                    'loss': loss_v,
+                    'accuracy': acc_v,
+                    'symmetry_error': err_v,
+                })
+
+            # ---- 모델 저장 (파일명에 seed 포함) ----
+            suffix = f"{n_block}_{data_size}_seed{seed}"
+            torch.save(symmetric_model.state_dict(), os.path.join(models_path, f'shared_model_{suffix}.pt'))
+            torch.save(vanilla_model.state_dict(), os.path.join(models_path, f'vanilla_model_{suffix}.pt'))
+            torch.save(symmetric_model_augmented.state_dict(), os.path.join(models_path, f'shared_model_aug_{suffix}.pt'))
+            torch.save(vanilla_model_augmented.state_dict(), os.path.join(models_path, f'vanilla_model_aug_{suffix}.pt'))
+
+            # 매 seed 루프마다 중간 저장 -> 중간에 죽어도 데이터 유실 최소화
+            pd.DataFrame(records).to_pickle(os.path.join(logs_path, 'total_result_multiseed_raw.pkl'))
+
+#
+# 최종 raw 결과 저장 (long-format DataFrame)
+#
+df = pd.DataFrame(records)
+df.to_pickle('total_result_graph_multiseed_raw.pkl')
+df.to_csv('total_result_graph_multiseed_raw.csv', index=False)
+
+print(f"\n총 {len(df)}개 row 저장 완료 (n_block x data_size x seed x model 조합)")
+print("모든 Grid Search + Multi-seed 실험 조건 완수 및 파일 저장 완료")
