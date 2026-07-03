@@ -527,7 +527,6 @@ def train(model, train_loader, val_loader=None, epochs=100, lr=1e-3, early_stop=
                 patience_counter += 1
             
             if patience > 0 and patience_counter >= patience:
-                print(f"Early stopping triggered at epoch {epoch+1}")
                 break
         else:
             bar.set_description(f'Loss: {avg_train_loss:.4f} | Acc: {train_acc*100:.1f}%')
@@ -645,20 +644,22 @@ seed_lst = [0, 1, 2, 3, 4]
 # raw 결과를 long-format으로 보존 (mean/CI로 바로 뭉개지 않음)
 records = []
 
-for i in range(len(n_blocks_list)):
+n_block_bar = tqdm(range(len(n_blocks_list)), desc='n block iterating...')
+for i in n_block_bar:
     n_block = n_blocks_list[i]
     hidden_dims = hidden_dims_lst[i]
 
-    for data_size in data_sizes_list:
+    data_size_bar = tqdm(data_sizes_list, desc='data size iterating...', leave=False)
+    for data_size in data_size_bar:
 
         if data_size < 10:
-            print(f"데이터 크기가 너무 작아 실험을 건너뜁니다. (Size: {data_size})")
             continue
 
-        for seed in seed_lst:
-            print(f"\n" + "="*60)
-            print(f"▶ [실험 시작] Blocks(깊이): {n_block} | Dataset Size: {data_size} | Seed: {seed}")
-            print("="*60)
+        seed_bar = tqdm(seed_lst, desc='seed iterating...', leave=False)
+        for seed in seed_bar:
+            n_block_bar.set_description(f'n_block={n_block}')
+            data_size_bar.set_description(f'data_size={data_size}')
+            seed_bar.set_description(f'seed={seed}')
 
             # --- seed마다 전역 random state를 전부 고정 ---
             random.seed(seed)
@@ -681,7 +682,6 @@ for i in range(len(n_blocks_list)):
             test_size = data_size - train_size - val_size
 
             if train_size == 0 or val_size == 0 or test_size == 0:
-                print(f"데이터 크기가 너무 작아 실험을 건너뜁니다. (Size: {data_size})")
                 continue
 
             train_dataset, val_dataset, test_dataset = random_split(
@@ -802,5 +802,4 @@ df = pd.DataFrame(records)
 df.to_pickle('total_result_graph_multiseed_raw.pkl')
 df.to_csv('total_result_graph_multiseed_raw.csv', index=False)
 
-print(f"\n총 {len(df)}개 row 저장 완료 (n_block x data_size x seed x model 조합)")
-print("모든 Grid Search + Multi-seed 실험 조건 완수 및 파일 저장 완료")
+print(f"총 {len(df)}개 row 저장 완료 (n_block x data_size x seed x model 조합)")
