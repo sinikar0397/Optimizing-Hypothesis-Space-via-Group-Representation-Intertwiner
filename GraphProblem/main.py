@@ -6,7 +6,6 @@ import torch.nn as nn
 from sklearn.model_selection import train_test_split
 import torch.optim as optim
 from tqdm.notebook import tqdm
-import pytorch_model_summary
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader as PyTorchDataLoader
 from torch.utils.data import TensorDataset
@@ -43,7 +42,7 @@ class PermutedDataset(Dataset):
     Args:
         base_datset (Dataset) : 기존 Datset (probably NCI1 Dataset)
         max_nodes (int) : NCI1 dataset에서 저장할 최대 노드 개수
-        permutations (array of tensor) :  
+        permutations (array of tensor) :  사전 저장한 각 데이터별 permutation
     '''
 
     def __init__(self, base_dataset, max_nodes):
@@ -89,6 +88,12 @@ class PermutedDataset(Dataset):
         return adj, x, data.y
 
 def collate_fn(batch):
+    '''
+        DataLoader 제작을 위한 collate function
+
+        Args:
+            batch (Iterational data) : 데이터 배치
+    '''
 
     adjs = []
     xs = []
@@ -295,6 +300,13 @@ class symmetricGraphLayer(nn.Module):
     
 
 class AttentionPooling(nn.Module):
+    '''
+    pooling layer for graph.
+    Shared MLP를 통과시킨 후 Attention pooling을 통해 flatten시킴
+
+        Args:
+            attn_net (nn.Sequential) : in_dimension -> in_dimension/2 -> 1 순서의 Linear Dense Layer
+    '''
     def __init__(self, in_dim):
         super().__init__()
         # 각 노드의 중요도를 스칼라(1차원) 점수로 변환하는 신경망
@@ -322,6 +334,15 @@ class AttentionPooling(nn.Module):
 
 
 class symmetricGraphMLP(nn.Module):
+    '''
+    Weight-shared Multi Layer perceptron
+
+    Args:
+        layers (nn.ModuleList) : 각각의 레이어들 저장하는 ModuleList
+        norms (nn.ModuleList) : 각각의 LayerNorm을 저장하는 ModuleList
+        pool (AttentionPooling) : Shared layer를 통과한 후 이용하는 Pooling Layer
+        classifier (nn.Sequential) : 최종 classifier
+    '''
     def __init__(self, in_dim, hidden_size, out_dim):
         super().__init__()
         self.layers = nn.ModuleList()
@@ -361,6 +382,15 @@ class symmetricGraphMLP(nn.Module):
 
 # vanilla model
 class vanillaGraphMLP(nn.Module):
+    '''
+    Vanilla Multi Layer perceptron
+
+    Args:
+        max_nodes (int) : NCI1 dataset에 이용하는 노드의 개수 최댓값
+        layers (nn.ModuleList) : 내부 Layer들을 저장해둔 ModuelList
+        classifier (nn.Sequential) : 최종 classifier
+
+    '''
     def __init__(self, max_nodes, in_dim, hidden_size, out_dim):
         super().__init__()
         self.max_nodes = max_nodes
