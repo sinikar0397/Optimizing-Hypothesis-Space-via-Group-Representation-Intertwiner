@@ -117,7 +117,7 @@ def collate_fn(batch):
     return (
         torch.stack(adjs).to(device),
         torch.stack(xs).to(device),
-        torch.stack(ys).to(device)
+        torch.stack(ys).to(device).view(-1)
     )
 
 
