@@ -9,12 +9,13 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 import pickle
+import copy
 import os
 
 #
 # defining device
 #
-device = torch.device('mps' if torch.backends.mps.is_available() and torch.backends.mps.is_built() else 'cpu')
+device = torch.device('mps' if torch.backends.mps.is_available() and torch.backends.mps.is_built() else 'cuda' if torch.cuda.is_available() else 'cpu')
 
 #
 # Dataset
@@ -249,7 +250,7 @@ def train(model, X, Y, epochs=1000, batch_size=256,
 
             if avg_loss_valid < best_loss:
                 best_loss = avg_loss_valid
-                best_model_state = model.state_dict()
+                best_model_state = copy.deepcopy(model.state_dict())
                 patience_counter = 0
             else:
                 patience_counter += 1
@@ -297,7 +298,7 @@ def symmetry_error(model, X, repeat=5, n_blocks=5):
     error = 0
     for _ in range(repeat):
         x_stacked = X.view(batch_size, n_blocks, 1)
-        p_indices = torch.randperm(n_blocks)
+        p_indices = torch.randperm(n_blocks, device = X.device)
         x_permuted = x_stacked[:, p_indices, :].reshape(batch_size, -1)
 
         y2 = model(x_permuted)
@@ -328,15 +329,14 @@ model_shape = [8, 16, 8, 4, 2]
 # 최소 5개 권장. 여유가 있으면 10개로 늘려서 CI를 더 안정적으로.
 seed_lst = [0, 1, 2, 3, 4]
 
-data_path = "./data/final_multiseed"
-logs_path = "./logs/final_multiseed"
-models_path = "./models/final_multiseed"
+data_path = "./data"
+logs_path = "./logs"
+models_path = "./models"
 os.makedirs(data_path, exist_ok=True)
 os.makedirs(logs_path, exist_ok=True)
 os.makedirs(models_path, exist_ok=True)
 
 generate_data = True
-device = torch.device('mps' if torch.backends.mps.is_available() and torch.backends.mps.is_built() else 'cpu')
 
 # --- 결과를 저장할 long-format 레코드 리스트 ---
 # raw 값을 그대로 보존 -> 이후 groupby, paired test, 시각화 등에 재사용 가능
@@ -357,7 +357,10 @@ for n_block in n_block_bar:
             # --- seed마다 데이터 생성 및 모델 초기화를 모두 다시 함 ---
             np.random.seed(seed)
             torch.manual_seed(seed)
-            torch.cuda.manual_seed_all(seed)
+
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed(seed)
+                torch.cuda.manual_seed_all(seed)
 
             if generate_data:
                 generate_and_save_data(data_path=data_path, n_block=n_block, data_size=data_size, seed=seed)
