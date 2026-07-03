@@ -649,13 +649,13 @@ for i in n_block_bar:
     n_block = n_blocks_list[i]
     hidden_dims = hidden_dims_lst[i]
 
-    data_size_bar = tqdm(data_sizes_list, desc='data size iterating...', leave=False)
+    data_size_bar = tqdm(data_sizes_list, desc='data size iterating...', leave=True)
     for data_size in data_size_bar:
 
         if data_size < 10:
             continue
 
-        seed_bar = tqdm(seed_lst, desc='seed iterating...', leave=False)
+        seed_bar = tqdm(seed_lst, desc='seed iterating...', leave=True)
         for seed in seed_bar:
             n_block_bar.set_description(f'n_block={n_block}')
             data_size_bar.set_description(f'data_size={data_size}')
