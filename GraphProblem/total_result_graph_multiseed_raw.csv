@@ -1,4 +1,4 @@
-n_block,data_size,seed,model,loss,accuracy,symmetry_error
+model depth,data_size,seed,model,loss,accuracy,symmetry_error
 3,500,0,symmetric,0.6798054575920105,0.58,5.572653392205271e-15
 3,500,0,vanilla,0.7146615386009216,0.4,7.329091313295067e-05
 3,500,0,symmetric_aug,0.6817559599876404,0.58,8.48476833497508e-15

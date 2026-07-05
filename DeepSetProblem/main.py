@@ -326,7 +326,6 @@ batch_size_dict = {
 model_shape = [8, 16, 8, 4, 2]
 
 # --- multi-seed 설정 ---
-# 최소 5개 권장. 여유가 있으면 10개로 늘려서 CI를 더 안정적으로.
 seed_lst = [0, 1, 2, 3, 4]
 
 data_path = "./data"
